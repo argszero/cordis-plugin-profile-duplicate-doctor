@@ -1,0 +1,63 @@
+# The @argszero/cordis-plugin-profile-duplicate-doctor bundle patch: mount and go.
+#
+# A plugin that lists a package the dsh installation already provides
+# (`@deepseek-ai/dsh-*`) in its `dependencies` makes pnpm install a real second
+# copy inside `<profile>/node_modules`. That plugin's `import` reaches the second
+# copy, so every module-level identity in the duplicated package is evaluated
+# twice. `@deepseek-ai/dsh-tools` publishes `TOOL_RUNTIME_SCHEDULER` as a
+# `unique symbol` and the agent loop reads it off the service instance the other
+# copy produced, so the lookup is `undefined` and the first tool call of every
+# turn dies — first-party `bash` and `read` included — while `tool/call` is
+# already on disk and `turn/end` closes immediately as an error:
+#
+#   dsh: UNKNOWN: Cannot read properties of undefined (reading 'prepare')
+#
+# The authoring guide asks for `peerDependencies` on exactly these packages
+# (docs/user/develop/basic/publish.md), and its exception clause — "independently
+# versioned third-party dependencies and stateless dsh utilities go in
+# `dependencies`" — is the trap: `@deepseek-ai/dsh-tools` looks like a stateless
+# utility and is not one, because it carries the `unique symbol` and the
+# `ToolRuntime` service identity.
+#
+# This plugin does not change how the harness resolves modules and does not
+# remove the duplicate copy. It scans the profile at boot, compares every entry
+# under `<profile>/node_modules` against the copy the installation owns by
+# `realpath`, and logs what it found — including what the scan does not cover.
+# It then admits ONE durable user-role advisory per agent, naming:
+#
+#   - the duplicated package, and both directories with their versions;
+#   - the manifest whose `dependencies` field declared it, with the range and
+#     the manifest path;
+#   - the edit the author owns: move the entry to `peerDependencies` (and
+#     `devDependencies`), then `pnpm install` in the profile and restart dsh.
+#
+# Because the advisory is admitted through the `agent/pre-step` waterfall, the
+# loop commits it into the session like any other accepted message, so the model
+# reads it in the step it was about and in every request after.
+#
+# The real fix is upstream: resolve the package through the installation, or key
+# the identity with `Symbol.for`, so that a second copy can no longer split it.
+# Discussion #8287 is where that is reported.
+#
+# Optional config:
+#
+#   - set:
+#       - id: profile-duplicate-doctor
+#         config:
+#           # true (default) = the finding also enters the session as one
+#           # user-role message per agent. false = log only: the scan still runs
+#           # and still reports to the host log, and nothing is ever written to
+#           # a session.
+#           advise: true
+#           # Package scopes treated as harness packages, whose identity cannot
+#           # span two copies. Everything else the installation owns is reported
+#           # as a usually-harmless duplicate.
+#           inboxScopes: ['@deepseek-ai/']
+#           href: ''                 # optional URL quoted in the advisory
+#
+# Nothing here writes: no copy is created, moved or removed, and the scan never
+# touches the profile tree.
+
+- insert:
+    - id: profile-duplicate-doctor
+      name: '@argszero/cordis-plugin-profile-duplicate-doctor'
