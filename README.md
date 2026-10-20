@@ -7,6 +7,12 @@ that declared it.
 npm install @argszero/cordis-plugin-profile-duplicate-doctor
 ```
 
+Until 0.2.0 reaches the registry, the same package installs straight from this
+repository — `npm install github:argszero/cordis-plugin-profile-duplicate-doctor`
+inside the profile directory, which builds `lib/` on install (verified
+2026-10-20 with npm 12.2.0: the tree arrives at version 0.2.0 with `lib/`
+present).
+
 Mount it in a profile and it runs on every start; there is nothing to configure.
 
 ```yaml
