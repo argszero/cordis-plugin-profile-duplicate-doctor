@@ -61,6 +61,7 @@
   "scripts": {
     "build": "tsc",
     "pretest": "tsc",
+    "prepare": "tsc",
     "test": "node --test \"test/*.spec.mjs\"",
     "prepublishOnly": "tsc",
     "test:inject": "node scripts/inject-defects.mjs"
