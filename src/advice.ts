@@ -45,6 +45,32 @@ function versionText(version: string | undefined): string {
 }
 
 /**
+ * Whether a finding carries two declared versions that disagree.
+ *
+ * This is the discriminator between the two outcomes the same second copy
+ * produces, and it only appears on the harness class. The compatibility preflight
+ * reads the manifest of the row it is about to load — which, for a shadowed in-box
+ * package, is the *profile's* copy — and disables that row when the version does
+ * not satisfy it. A run whose `tools` row never activates does not reach a first
+ * tool call; the process stops during boot, before any plugin can report anything.
+ * Reporting the version split at least names which of the two the next start will
+ * be, instead of leaving the reader to guess from an identical-looking log line.
+ * @param finding - one reported copy.
+ * @returns true when both versions are declared and differ, for a harness package.
+ */
+export function versionsDiffer(finding: DuplicateFinding): boolean {
+  return finding.severity === 'identity'
+    && finding.profileVersion !== undefined
+    && finding.installationVersion !== undefined
+    && finding.profileVersion !== finding.installationVersion
+}
+
+/** The consequence of a version split, said once wherever it applies. */
+export const VERSION_SPLIT_NOTE = 'the two copies are different versions: the compatibility preflight decides at'
+  + ' the NEXT start whether the installation still accepts the profile\'s one, and a refusal there stops the'
+  + ' process during boot — before any plugin, this one included, can report it'
+
+/**
  * The boot-time log block for one scan.
  *
  * A quiet start and a scan that never ran must not look alike, so this returns
@@ -71,6 +97,7 @@ export function bootReportLines(report: ScanReport): readonly string[] {
       + ` ${finding.profileDir} vs installation ${versionText(finding.installationVersion)} at`
       + ` ${finding.installationDir}`)
     lines.push(`    ${declarationLine(finding).trimStart()}`)
+    if (versionsDiffer(finding)) lines.push(`    note: ${VERSION_SPLIT_NOTE}`)
   }
   for (const note of report.notes) lines.push(`  note: ${note}`)
   return lines
@@ -83,6 +110,32 @@ export function hostLine(report: ScanReport): string {
     + ` already provides, installed into ${report.modulesDir} by the manifest(s) named below; a harness package`
     + ` duplicated this way splits its module-level identity and the first tool call of every turn fails with`
     + ` "${CRASH_SIGNATURE}" (discussion ${DISCUSSION})`
+}
+
+/**
+ * The log block for a rescan: what changed since the last scan, then the report.
+ *
+ * The boot block is reused verbatim so a reader parses one shape, and the header
+ * carries the two facts a boot block cannot: that this is a *rescan*, and which
+ * direction the profile moved. A rescan that finds nothing new is not logged at
+ * all — the caller compares the findings first — so every line this returns
+ * describes a change that actually happened.
+ * @param report - the rescan.
+ * @param previous - the report it replaced.
+ * @returns one line per fact, the header first.
+ */
+export function rescanReportLines(report: ScanReport, previous: ScanReport | undefined): readonly string[] {
+  const before = new Set((previous?.findings ?? []).map(finding => finding.name))
+  const after = new Set(report.findings.map(finding => finding.name))
+  const added = [...after].filter(name => !before.has(name))
+  const removed = [...before].filter(name => !after.has(name))
+  const delta = [
+    added.length === 0 ? '' : `now carrying a second copy of ${added.join(', ')}`,
+    removed.length === 0 ? '' : `no longer carrying a second copy of ${removed.join(', ')}`,
+  ].filter(part => part !== '').join('; ')
+  const header = `profile-duplicate-doctor: the profile changed on disk; rescanned ${report.modulesDir}`
+    + `${delta === '' ? '' : ` — ${delta}`}`
+  return [header, ...bootReportLines(report)]
 }
 
 /** The one-line transcript summary for the advisory. */
@@ -117,6 +170,16 @@ export function adviceText(report: ScanReport, context: AdviceContext): string {
     lines.push(`  profile copy:       ${finding.profileDir} (${versionText(finding.profileVersion)})`)
     lines.push(`  installation copy:  ${finding.installationDir} (${versionText(finding.installationVersion)})`)
     lines.push(declarationLine(finding))
+  }
+  if (report.findings.some(finding => versionsDiffer(finding))) {
+    lines.push(
+      'These two copies are different versions, and that decides which failure follows. A version the startup',
+      'compatibility check still accepts splits the identity and fails at the first tool call of each turn. A',
+      'version it no longer accepts is refused while the package loads, the row never activates, and the process',
+      'stops during boot — a restart may then open no session at all, and no plugin can report anything from a',
+      'process that never finished starting. Either way the edit below is the fix.',
+      '',
+    )
   }
   lines.push(
     '',

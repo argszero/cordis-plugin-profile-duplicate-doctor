@@ -353,6 +353,24 @@ function collectDeclarers(
 }
 
 /**
+ * A stable one-string fingerprint of what a scan found.
+ *
+ * Two scans of the same profile must compare equal, and any change in *which*
+ * packages are duplicated — a new one, a vanished one, a copy that moved — must
+ * compare unequal. It is built from the finding's identity (name, directory,
+ * version), not from its attribution: a manifest edited to declare the same copy
+ * differently does not change what is on disk, and re-announcing it would be a
+ * false alarm. The order is the findings' own, which the scan already sorts.
+ * @param report - one scan.
+ * @returns the fingerprint; an empty report is the empty string.
+ */
+export function findingSignature(report: ScanReport): string {
+  return report.findings
+    .map(finding => `${finding.name}\u0000${finding.profileDir}\u0000${finding.profileVersion ?? ''}`)
+    .join('\n')
+}
+
+/**
  * Scan one profile for packages it carries a second copy of.
  * @param options - the profile and the optional installation resolver.
  * @returns the report; `findings` is empty when every installation-owned entry is shared.

@@ -23,6 +23,17 @@
 # remove the duplicate copy. It scans the profile at boot, compares every entry
 # under `<profile>/node_modules` against the copy the installation owns by
 # `realpath`, and logs what it found — including what the scan does not cover.
+#
+# It also rescans when the profile changes while dsh is running, because that is
+# the only window in which this defect can still be named. A plugin installed
+# into a live profile is invisible to a scan taken before it, and the next start
+# is the one that pays: either the first tool call of every turn fails, or — when
+# the shadowed copy's version is outside what the installation accepts — the
+# startup compatibility check refuses the row and the process stops during boot,
+# where no plugin runs at all. The rescan reports only when the set of second
+# copies actually changed, and an agent already advised is told again about the
+# new set once.
+#
 # It then admits ONE durable user-role advisory per agent, naming:
 #
 #   - the duplicated package, and both directories with their versions;
@@ -54,6 +65,12 @@
 #           # as a usually-harmless duplicate.
 #           inboxScopes: ['@deepseek-ai/']
 #           href: ''                 # optional URL quoted in the advisory
+#           # true (default) = rescan when the profile changes on disk, so an
+#           # install made while dsh is running is named before the restart.
+#           # false = the boot scan only.
+#           watch: true
+#           # How long a burst of changes settles before the rescan runs (ms).
+#           watchSettleMs: 250
 #
 # Nothing here writes: no copy is created, moved or removed, and the scan never
 # touches the profile tree.

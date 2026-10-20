@@ -137,8 +137,41 @@ export async function world(config, options = {}) {
     // lookup under test is genuinely the optional `get` path.
     await ctx.plugin({ name: 'profile-facts-stand-in', apply: c => { c.provide('profileContext', options.profile) } })
   }
-  await ctx.plugin({ name: plugin.name, apply: c => { plugin.apply(c, config ?? {}) } })
-  return { ctx, logged }
+  const fork = await ctx.plugin({ name: plugin.name, apply: c => { plugin.apply(c, config ?? {}) } })
+  // The mount is returned so a test can unmount it: the plugin arms a filesystem
+  // watch on the profile, and what that watch does *after* the mount ends is one
+  // of the arms (`rescan.spec.mjs`).
+  return { ctx, logged, dispose: async () => { await fork.dispose() } }
+}
+
+/**
+ * Wait, in real time.
+ *
+ * The rescan is driven by real filesystem events and a settle timer, so a test
+ * that wants to observe it has to let wall-clock time pass. Nothing here is a
+ * substitute for the event: `waitFor` polls a condition the plugin produced, so
+ * a slow machine costs a slower test rather than a flaky one.
+ * @param ms - milliseconds to wait.
+ * @returns a promise that settles afterwards.
+ */
+export function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Poll until a condition holds.
+ * @param condition - the predicate.
+ * @param timeoutMs - how long to keep asking.
+ * @param intervalMs - how long to wait between asks.
+ * @returns whether the condition held within the timeout.
+ */
+export async function waitFor(condition, timeoutMs = 5000, intervalMs = 25) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (condition()) return true
+    if (Date.now() > deadline) return false
+    await sleep(intervalMs)
+  }
 }
 
 /**

@@ -69,7 +69,14 @@ stateless utility. It is not one: it carries the `unique symbol` and the
    second copy. The verdicts go to the host log either way, because a quiet start
    and a scan that never ran must not look alike, and the scan's own limits are
    part of the report.
-2. **One durable advisory per agent.** The `agent/pre-step` waterfall decides
+2. **A rescan when the profile changes.** Installing a plugin into a live profile
+   is the ordinary case — `dsh plugin add`, one keystroke before a restart — and a
+   scan taken before it cannot see it. The plugin watches `<profile>`,
+   `<profile>/node_modules` and every `@scope` directory under it, coalesces one
+   install into one rescan, and reports only when the set of second copies
+   actually changed. An agent that was already told about the old set is told
+   about the new one, once; an agent that has heard nothing new is not disturbed.
+3. **One durable advisory per agent.** The `agent/pre-step` waterfall decides
    which messages enter a step, so the first step of each agent additionally
    carries one user-role message naming the duplicated package, both directories
    and their versions, the manifest whose `dependencies` field declared it (with
@@ -85,6 +92,25 @@ The report separates two cases, and says which one it is:
 - **`duplicate`** — any other installation-owned name. Two copies are two
   modules, which is usually harmless; reported, and read as a warning if the
   package is one whose identity elsewhere has to be a single instance.
+
+## Two copies are not always the same failure
+
+The same second copy has two endings, and the versions decide which:
+
+- **within what the installation accepts** (the common case: the plugin pinned
+  the same version, or a compatible one) — the identity splits, everything loads,
+  and the **first tool call of every turn** dies with `reading 'prepare'`. The
+  advisory reaches the model before that call, which is why it rides
+  `agent/pre-step`.
+- **outside what the installation accepts** — the startup compatibility check
+  refuses the row whose manifest now resolves to the profile's copy. The row never
+  activates, the service other packages require is missing, and the process
+  **stops during boot**. No plugin runs in that process, this one included, so the
+  only place such a profile can be named is the run *before* the restart — which
+  is what the watch above exists for.
+
+The report says which one it is, rather than leaving it to be inferred from an
+otherwise identical log line.
 
 ## What it does NOT do
 
@@ -125,10 +151,30 @@ the same copy.
         inboxScopes: ['@deepseek-ai/']
         # Optional URL quoted at the end of the advisory.
         href: ''
+        # true (default): rescan when the profile changes on disk, so an install
+        # made while dsh is running is named before the restart. false: the boot
+        # scan only.
+        watch: true
+        # How long a burst of changes settles before the rescan runs (ms).
+        watchSettleMs: 250
 ```
 
-Nothing here writes: no copy is created, moved or removed, and the scan never
-touches the profile tree.
+Nothing here writes: no copy is created, moved or removed, and neither the scan
+nor the watch touches the profile tree.
+
+## What the watch cannot cover
+
+- **A change that arrives before this process started.** The boot scan is the
+  first reading; nothing earlier exists.
+- **A process that is never started again.** The verdict is a diagnosis, not a
+  repair: a user who leaves the profile as it is still meets the failure at the
+  next start.
+- **A copy nested inside another package's own `node_modules`.** Only the top
+  level of the profile's `node_modules` is inspected — the hoisted linker's
+  flattened shape. The report says so on every run.
+- **A process that dies during boot.** Nothing in that process runs, so the case
+  is named only from the run before it, which is why the rescan reports a version
+  split rather than waiting for the failure.
 
 ## Compatibility
 
@@ -145,17 +191,20 @@ runtime peer.
 ## Tests
 
 ```sh
-npm test           # scan arms, plugin arms, packaging guard
+npm test             # scan arms, plugin arms, rescan arms, packaging guard
 npm run test:inject  # mutate the source, rebuild, and require every mutation to be caught
 ```
 
 The behavior suites build real profile trees under the OS temp directory and drive
-the real `agent/pre-step` waterfall on a real cordis context. What they prove is
-that the listener is wired to the seam, that the advisory rides the message batch
-the loop commits, and that the scan's verdicts come from the filesystem. What
-they do not prove — and do not claim — is that the harness's linker produced the
-tree, or that a real `dsh` crashes this way: the tree is built to the shape the
-report describes, and the crash text is taken from it.
+the real `agent/pre-step` waterfall on a real cordis context. The rescan arms go
+one step further and let a real `fs.watch` deliver real filesystem changes: a
+plugin installed mid-session, a scope directory created mid-session, a copy
+removed, an edit that changes nothing, and an unmount that must stop all of it.
+What they prove is that the listener is wired to the seam, that the advisory rides
+the message batch the loop commits, and that the scan's verdicts come from the
+filesystem. What they do not prove — and do not claim — is that the harness's
+linker produced the tree, or that a real `dsh` crashes this way: the tree is built
+to the shape the report describes, and the crash text is taken from it.
 
 ## License
 

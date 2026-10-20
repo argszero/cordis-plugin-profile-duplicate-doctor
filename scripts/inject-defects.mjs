@@ -161,6 +161,66 @@ const MUTATIONS = [
       'const SHARED_STATES = new WeakMap<object, AgentState>()\nexport function createAdviceLedger(): AdviceLedger {',
     ]],
   },
+  {
+    name: 'the mount option that turns the watch off is ignored, so a log-only mount still arms a filesystem watch',
+    file: 'src/index.ts',
+    arms: 'rescan.spec.mjs',
+    edits: [[
+      '  if (facts === undefined || config.watch === false) return',
+      '  if (facts === undefined) return',
+    ]],
+  },
+  {
+    name: 'the ledger ignores its generation, so an agent already advised is never told that the profile changed under it',
+    file: 'src/state.ts',
+    arms: 'rescan.spec.mjs',
+    edits: [[
+      '      if (existing.generation === current) {',
+      '      if (current >= 0) {',
+    ]],
+  },
+  {
+    name: 'every rescan is announced, so an install that changed nothing is reported as a change',
+    file: 'src/index.ts',
+    arms: 'rescan.spec.mjs',
+    edits: [[
+      '          if (!changed) return',
+      '          void changed',
+    ]],
+  },
+  {
+    name: 'scope directories are not watched, so a package installed inside an existing scope is never seen',
+    file: 'src/watch.ts',
+    arms: 'rescan.spec.mjs',
+    edits: [[
+      '  for (const scope of scopesIn(modulesDir)) directories.push(join(modulesDir, scope))',
+      '  for (const scope of [] as string[]) directories.push(join(modulesDir, scope))',
+    ]],
+  },
+  {
+    name: 'closing the watch only forgets its handles, so a disposed mount keeps rescanning the profile',
+    file: 'src/watch.ts',
+    arms: 'rescan.spec.mjs',
+    edits: [[
+      '      closed = true\n'
+      + '      if (timer !== undefined) {\n'
+      + '        clearTimeout(timer)\n'
+      + '        timer = undefined\n'
+      + '      }\n'
+      + '      for (const watcher of watchers.values()) closeQuietly(watcher)\n'
+      + '      watchers.clear()',
+      '      watchers.clear()',
+    ]],
+  },
+  {
+    name: 'a version split is claimed for any harness duplicate, so the warning fires on the case it does not describe',
+    file: 'src/advice.ts',
+    arms: 'rescan.spec.mjs',
+    edits: [[
+      "  return finding.severity === 'identity'\n    && finding.profileVersion !== undefined",
+      "  return finding.severity === 'identity'\n    || finding.profileVersion !== undefined",
+    ]],
+  },
 ]
 
 /** Rebuild `lib/` from `src/`; true when tsc accepted the tree. */

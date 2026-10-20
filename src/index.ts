@@ -33,11 +33,19 @@
  *    directory is a second copy, reported with the manifest that declared it.
  *    The verdicts go to the host log either way, because a quiet start and a
  *    scan that never ran must not look alike.
- * 2. **One durable advisory per agent.** The `agent/pre-step` waterfall decides
+ * 2. **A rescan when the profile changes.** The boot scan describes the profile
+ *    this process started with, and a plugin installed into the profile afterwards
+ *    — the ordinary `dsh plugin add` — is invisible to it. That install is exactly
+ *    what makes the next start fail, so the plugin watches the profile, coalesces
+ *    one install into one rescan, and speaks only when the set of second copies
+ *    actually changed (see `watch.ts`).
+ * 3. **One durable advisory per agent.** The `agent/pre-step` waterfall decides
  *    which messages enter a step, so the first step of each agent additionally
  *    carries one user-role message naming the copies, the declaring manifests,
  *    and the edit the author owns. It is committed to the session by the loop
- *    like any other admitted message, so it survives into the next request.
+ *    like any other admitted message, so it survives into the next request. A
+ *    rescan that changes the set of copies opens a new generation, so an agent
+ *    already advised is told about the new fact once (see `state.ts`).
  *
  * ## Why the fix is not here
  *
@@ -71,10 +79,12 @@ import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed, UserMessage } from '@deepseek-ai/dsh-llm'
-import { adviceText, bootReportLines, hostLine, summaryOf } from './advice.js'
+import { adviceText, bootReportLines, hostLine, rescanReportLines, summaryOf } from './advice.js'
 import type { InstallationCopy, InstallationResolver, ScanReport } from './scan.js'
-import { scanProfileDuplicates } from './scan.js'
+import { findingSignature, scanProfileDuplicates } from './scan.js'
 import { createAdviceLedger } from './state.js'
+import { DEFAULT_SETTLE_MS, watchProfile } from './watch.js'
+
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -118,6 +128,23 @@ export interface Config {
   inboxScopes?: string[]
   /** URL quoted in the advisory as the upstream thread; optional. */
   href?: string
+  /**
+   * Rescan when the profile changes on disk. Default true.
+   *
+   * A boot scan describes the profile the process started with. A plugin
+   * installed into the profile *afterwards* — the ordinary `dsh plugin add`, one
+   * keystroke before a restart — is invisible to it, and that install is exactly
+   * what makes the next start fail. The watch is what lets this process name the
+   * offender before it is restarted, and it is the only moment it can: the
+   * failure it warns about happens during boot, where no plugin runs.
+   */
+  watch?: boolean
+  /**
+   * How long a burst of profile changes may settle before the rescan runs, in
+   * milliseconds. Default {@link DEFAULT_SETTLE_MS}: one `pnpm install` writes
+   * many entries and must produce one rescan, not one per entry.
+   */
+  watchSettleMs?: number
 }
 
 /**
@@ -209,7 +236,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   const advise = config.advise !== false
   const href = config.href
   const ledger = createAdviceLedger()
-  const report = boot(ctx, config)
+  const facts = readFacts(ctx)
+  // The report the reactive half reads, replaced by every rescan that finds a
+  // different set of copies. `let` rather than a captured const because the
+  // profile is a live directory: installing a plugin into it is the event this
+  // plugin exists to name, and it happens after the boot scan.
+  let report = facts === undefined ? undefined : takeScan(ctx, config, facts, 'boot')
+  let signature = report === undefined ? '' : findingSignature(report)
 
   /**
    * The advisory for one agent, when there is a finding and this agent is owed it.
@@ -236,41 +269,95 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (message === undefined) return decision
     return { ...decision, messages: [...decision.messages, message] }
   })
+
+  if (facts === undefined || config.watch === false) return
+  ctx.effect(() => {
+    const watch = watchProfile({
+      profileDir: facts.dir,
+      settleMs: config.watchSettleMs ?? DEFAULT_SETTLE_MS,
+      onChange: () => {
+        try {
+          const next = takeScan(ctx, config, facts, 'quiet')
+          if (next === undefined) return
+          const previous = report
+          const changed = findingSignature(next) !== signature
+          report = next
+          signature = findingSignature(next)
+          if (!changed) return
+          // A different set of copies is a new fact for every live agent: the one
+          // already told about the old set is owed the new one, and no agent is
+          // owed it twice.
+          ledger.bump()
+          for (const line of rescanReportLines(next, previous)) {
+            if (next.findings.length === 0) ctx.logger.info(line)
+            else ctx.logger.warn(line)
+          }
+        } catch (error: unknown) {
+          ctx.logger.warn(`profile-duplicate-doctor: rescan failed, previous report kept: ${String(error)}`)
+        }
+      },
+      onError: (directory: string, error: unknown) => {
+        ctx.logger.warn(`profile-duplicate-doctor: cannot watch ${directory}, so changes there are not`
+          + ` rescanned: ${String(error)}`)
+      },
+    })
+    ctx.logger.info(`profile-duplicate-doctor: watching ${watch.directories().join(', ')} for installs and removals`)
+    return () => watch.close()
+  }, 'profile-duplicate-doctor: profile watch')
 }
 
 /**
- * The boot half: scan and report.
+ * Read the launcher's facts once, saying why when there are none.
+ *
+ * Not a claim that everything is fine: without the launcher's facts there is no
+ * profile to scan, and saying so is the difference between "nothing to report"
+ * and "no report was taken".
+ * @param ctx - the plugin's context, for logging.
+ * @returns the facts, or undefined when they cannot be read.
+ */
+function readFacts(ctx: Context): ProfileFacts | undefined {
+  try {
+    const facts = readProfileFacts(ctx)
+    if (facts === undefined) {
+      ctx.logger.warn('profile-duplicate-doctor: no profileContext in this process, so no boot scan was taken')
+    }
+    return facts
+  } catch (error: unknown) {
+    ctx.logger.warn(`profile-duplicate-doctor: profile lookup failed, no boot scan: ${String(error)}`)
+    return undefined
+  }
+}
+
+/**
+ * Scan, and say what was found.
  *
  * Every failure here is caught and logged: a plugin that cannot read the profile
  * must not stop the process that is loading it.
  * @param ctx - the plugin's context, for logging.
  * @param config - resolved options.
+ * @param facts - the launcher's profile facts.
+ * @param phase - `boot` reports; `quiet` scans without reporting, leaving the
+ *   decision to the caller, which is what a rescan needs (an unchanged profile
+ *   must be silent).
  * @returns the scan, or undefined when none could be taken.
  */
-function boot(ctx: Context, config: Config): ScanReport | undefined {
-  let facts: ProfileFacts | undefined
-  try {
-    facts = readProfileFacts(ctx)
-  } catch (error: unknown) {
-    ctx.logger.warn(`profile-duplicate-doctor: profile lookup failed, no boot scan: ${String(error)}`)
-    return undefined
-  }
-  if (facts === undefined) {
-    // Not a claim that everything is fine: without the launcher's facts there is
-    // no profile to scan, and saying so is the difference between "nothing to
-    // report" and "no report was taken".
-    ctx.logger.warn('profile-duplicate-doctor: no profileContext in this process, so no boot scan was taken')
-    return undefined
-  }
+function takeScan(
+  ctx: Context,
+  config: Config,
+  facts: ProfileFacts,
+  phase: 'boot' | 'quiet',
+): ScanReport | undefined {
   try {
     const report = scanProfileDuplicates({
       profileDir: facts.dir,
       installation: createInstallationResolver(facts.installAnchor),
       ...config.inboxScopes === undefined ? {} : { inboxScopes: config.inboxScopes },
     })
-    for (const line of bootReportLines(report)) {
-      if (report.findings.length === 0) ctx.logger.info(line)
-      else ctx.logger.warn(line)
+    if (phase === 'boot') {
+      for (const line of bootReportLines(report)) {
+        if (report.findings.length === 0) ctx.logger.info(line)
+        else ctx.logger.warn(line)
+      }
     }
     return report
   } catch (error: unknown) {
